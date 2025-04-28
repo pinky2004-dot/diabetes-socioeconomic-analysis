@@ -50,9 +50,8 @@ def fetch_cdc_data():
 def fetch_census_data():
     print("Fetching Census socioeconomic data...")
     
-    # Use the same parameters as your browser test
     variables = ["NAME", "B17001_001E"]  # Poverty rate variable
-    year = 2019  # Must match the year you tested in the browser
+    year = 2019
     
     # Fetch data for all counties in all states
     census_data = c.acs5.get(
