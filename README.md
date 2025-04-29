@@ -1,10 +1,6 @@
-# diabetes-socioeconomic-analysis
-
 # Project Title: Impact of Socioeconomic Factors on Diabetes Prevalence in the US 
 
 ## Domain: Public Health / Epidemiology 
-
-  
 
 # 1. Data Collection 
 
@@ -16,7 +12,6 @@
 Data Processing:
 - Merge datasets using county FIPS codes. 
 - Clean missing values and standardize metrics (e.g., diabetes rate per 100k residents).
-- Export as CSV files: diabetes.csv, socioeconomic.csv, healthcare.csv. 
 
 # 2. Hypotheses 
 
