@@ -1,136 +1,174 @@
 import pandas as pd
+import numpy as np
 
 # =====================================================
-# 1. Food Access Data Cleaning
+# 1. Configuration
 # =====================================================
-def clean_food_access_data():
-    food_df = pd.read_csv("../data/raw/usda_food_access.csv")
-    
-    # Keep essential columns
-    food_clean = food_df[["State", "County", "LA1and10", "LILATracts_1And10"]]
-    
-    # Aggregate to county level
-    return food_clean.groupby(["State", "County"]).agg({
-        "LA1and10": "sum",
-        "LILATracts_1And10": "sum"
-    }).reset_index()
+INPUT_PATHS = {
+    "diabetes": "../data/raw/cdc_diabetes.csv",
+    "census": "../data/raw/census_socioeconomic.csv",
+    "food_access": "../data/raw/usda_food_access.csv",
+    "rural_urban": "../data/raw/rural_urban_codes.csv"
+}
+
+OUTPUT_PATH = "../data/processed/final_dataset.csv"
 
 # =====================================================
-# 2. Rural-Urban Data Cleaning
+# 2. Helper Functions
 # =====================================================
-def clean_rural_urban_data():
-    rural_df = pd.read_csv("../data/raw/rural_urban_codes.csv", encoding='latin-1')
-    
-    # Process rural-urban codes
-    rural_clean = rural_df[["FIPS", "Value"]].copy()
-    rural_clean.rename(columns={"Value": "RuralUrbanCode"}, inplace=True)
-    
-    rural_clean["RuralUrbanCode"] = pd.to_numeric(
-        rural_clean["RuralUrbanCode"], errors="coerce"
-    )
-    rural_clean["is_rural"] = rural_clean["RuralUrbanCode"].apply(
-        lambda x: 1 if x >= 4 else 0
-    )
-    
-    return rural_clean[["FIPS", "is_rural"]]
 
-# =====================================================
-# 3. Helper Functions
-# =====================================================
-def normalize_name(name):
+def normalize_name(name: str) -> str:
+    """Normalize geographic names for consistent merging"""
     return (
         str(name).lower()
         .replace("county", "")
         .replace(",", "")
         .strip()
-        if pd.notnull(name) else ""
     )
 
-def extract_county_and_state(location):
-    if pd.isna(location):
-        return "", ""
+def extract_geo_components(location: str) -> tuple:
+    """Extract county and state from location strings"""
     parts = str(location).split(",")
     return (
         normalize_name(parts[0]),
-        normalize_name(parts[1]) if len(parts) > 1 
-        else (normalize_name(location), "")
+        normalize_name(parts[1]) if len(parts) > 1 else ""
     )
 
-def extract_state(location):
-    return normalize_name(location) if pd.notnull(location) else ""
+# =====================================================
+# 3. Data Cleaning Components
+# =====================================================
 
-# =====================================================
-# 4. Main Preprocessing Pipeline
-# =====================================================
-def preprocess_data():
-    # Load core datasets
-    diabetes_df = pd.read_csv("../data/raw/cdc_diabetes.csv")
-    census_df = pd.read_csv("../data/raw/census_socioeconomic.csv")
+def process_food_access() -> pd.DataFrame:
+    """Clean and aggregate USDA food access data"""
+    df = pd.read_csv(INPUT_PATHS["food_access"])
     
-    # Process supplementary data
-    food_df = clean_food_access_data()
-    rural_df = clean_rural_urban_data()
-
-    # =====================
-    # Census Data Processing
-    # =====================
-    census_df[['county_clean', 'state_clean']] = census_df['county_name'].apply(
-        lambda x: pd.Series(extract_county_and_state(x))
-    )
-    census_df = census_df.assign(
-        state=census_df['state_clean'].str.title(),
-        county=census_df['county_clean'].str.title(),
-        state_only=census_df['state_clean']
+    # Validate required columns
+    req_cols = ["State", "County", "LA1and10", "LILATracts_1And10"]
+    if not set(req_cols).issubset(df.columns):
+        raise ValueError("Missing required columns in food access data")
+    
+    return (
+        df[req_cols]
+        .groupby(["State", "County"])
+        .agg({"LA1and10": "sum", "LILATracts_1And10": "sum"})
+        .reset_index()
+        .rename(columns={"State": "state", "County": "county"})
     )
 
-    # ======================
-    # Diabetes Data Processing
-    # ======================
-    diabetes_state = diabetes_df.assign(
-        state_only=diabetes_df['locationdesc'].apply(extract_state)
-    ).groupby("state_only").agg({
-        "yearstart": "first",
-        "datavaluetype": "first",
-        "datavalue": "first"
-    }).reset_index()
+def process_rural_urban() -> pd.DataFrame:
+    """Process rural-urban classification data"""
+    df = pd.read_csv(INPUT_PATHS["rural_urban"], encoding='latin-1')
+    
+    # Clean and transform
+    return (
+        df[["FIPS", "Value"]]
+        .rename(columns={"Value": "RuralUrbanCode"})
+        .assign(
+            RuralUrbanCode=lambda x: pd.to_numeric(x.RuralUrbanCode, errors="coerce"),
+            is_rural=lambda x: np.where(x.RuralUrbanCode >= 4, 1, 0)
+        )
+        [["FIPS", "is_rural"]]
+    )
 
-    # ==============
-    # Merge Sequence
-    # ==============
+def process_diabetes() -> pd.DataFrame:
+    """Clean and validate diabetes data"""
+    df = pd.read_csv(INPUT_PATHS["diabetes"])
+    
+    return (
+        df.assign(
+            state_only=df["locationdesc"].apply(lambda x: normalize_name(x))
+        )
+        .groupby("state_only")
+        .agg({
+            "yearstart": "first",
+            "datavaluetype": "first",
+            "datavalue": "first"
+        })
+        .reset_index()
+        .rename(columns={"datavalue": "diabetes_prevalence"})
+        .pipe(lambda df: df[
+            (df.diabetes_prevalence.between(5, 20)) &
+            (df.datavaluetype == "Crude Prevalence")
+        ])
+    )
+
+def process_census() -> pd.DataFrame:
+    """Process census socioeconomic data"""
+    df = pd.read_csv(INPUT_PATHS["census"])
+    
+    # Extract geographic components
+    geo_components = df["county_name"].apply(
+        lambda x: pd.Series(extract_geo_components(x), 
+                          index=["county_clean", "state_clean"])
+    )
+    
+    return pd.concat([df, geo_components], axis=1).assign(
+        state=lambda x: x.state_clean.str.title(),
+        county=lambda x: x.county_clean.str.title(),
+        state_only=lambda x: x.state_clean
+    )
+
+# =====================================================
+# 4. Core Processing Pipeline
+# =====================================================
+
+def merge_datasets() -> pd.DataFrame:
+    """Main data merging pipeline"""
+    # Process individual datasets
+    census_df = process_census()
+    diabetes_df = process_diabetes()
+    food_df = process_food_access()
+    rural_df = process_rural_urban()
+
+    # Merge sequence
     merged = (
-        pd.merge(census_df, diabetes_state, on="state_only", how="inner")
-        .merge(food_df.rename(columns={
-            "State": "state",
-            "County": "county"
-        }), on=["state", "county"], how="left")
+        census_df
+        .merge(diabetes_df, on="state_only", how="inner")
+        .merge(food_df, on=["state", "county"], how="left")
         .merge(rural_df, on="FIPS", how="left")
     )
+    
+    return merged
 
-    # ================
-    # Finalize Dataset
-    # ================
-    final_df = merged[[
-        "state", "county", "yearstart", "datavaluetype",
-        "datavalue", "poverty_population", "FIPS",
-        "LA1and10", "LILATracts_1And10", "is_rural"
-    ]].rename(columns={
-        "yearstart": "year",
-        "datavaluetype": "metric_type",
-        "datavalue": "diabetes_prevalence"
-    })
+def finalize_dataset(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply final transformations and validations"""
+    return (
+        df
+        .rename(columns={"yearstart": "year"})
+        [[
+            "state", "county", "year", "diabetes_prevalence",
+            "poverty_population", "FIPS", "LA1and10", 
+            "LILATracts_1And10", "is_rural"
+        ]]
+        .assign(
+            diabetes_prevalence=lambda x: x.diabetes_prevalence.clip(5, 20),
+            is_rural=lambda x: x.is_rural.fillna(0).astype(int),
+            FIPS=lambda x: x.FIPS.astype(str).str.zfill(5)
+        )
+        .drop_duplicates()
+        .sort_values(["state", "county"])
+    )
 
-    # Type conversions
-    final_df = final_df.assign(
-        diabetes_prevalence=pd.to_numeric(
-            final_df["diabetes_prevalence"], errors="coerce"
-        ),
-        year=final_df["year"].astype(int)
-    ).dropna(subset=["diabetes_prevalence"])
+# =====================================================
+# 5. Main Execution
+# =====================================================
 
-    # Save processed data
-    final_df.to_csv("../data/processed/final_dataset.csv", index=False)
-    print("Processed data saved to data/processed/final_dataset.csv")
-    return True
+def preprocess_data():
+    """Orchestrate full preprocessing workflow"""
+    try:
+        final_df = finalize_dataset(merge_datasets())
+        final_df.to_csv(OUTPUT_PATH, index=False)
+        
+        print("Successfully processed data:")
+        print(f"- Total counties: {len(final_df)}")
+        print(f"- Diabetes range: {final_df.diabetes_prevalence.min()}%-{final_df.diabetes_prevalence.max()}%")
+        print(f"- Rural counties: {final_df.is_rural.sum()} ({final_df.is_rural.mean():.1%})")
+        
+        return final_df
+        
+    except Exception as e:
+        print(f"Processing failed: {str(e)}")
+        raise
 
 if __name__ == "__main__":
     preprocess_data()
